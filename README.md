@@ -1,17 +1,25 @@
 # Claude Code Custom Statusline
 
-A feature-rich status line for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that goes beyond what the official docs cover.
+A feature-rich status line for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that goes beyond what the official docs cover — live reasoning effort (including `max` and `ultracode`), per-turn `ultrathink`/`megathink` badges, fast mode, a compaction-aware context bar that knows 200k from 1M, and rate-limit windows.
 
 ```
-Opus 4.6 | high | Explanatory | main
-ctx(200k) ▓▓▓▓▓░░░░░░░░░░░░░░░ 74% left
+Opus 4.8 (1M context) | ultracode | ✦ultrathink | ⚡fast | default | main
+ctx(1M) ▓▓▓▓▓░░░░░░░░░░░░░░░ 74% left
+session ▓▓▓▓▓▓░░░░░░░░░░░░░░ 30% used ~2h00m | weekly 29% used ~5h50m
 ```
 
 ## What it shows
 
-**Line 1:** Model name | thinking effort level | output style | git branch | worktree
+**Line 1** (all segments optional except the model):
+`model | effort | thinking badge | fast mode | output style | git branch | worktree`
 
-**Line 2:** Context window size | compaction-aware usage bar | % remaining | 200k overflow warning
+- **effort** — `low` / `medium` / `high` / `xhigh` / `max`, colored as a heat gradient (dim → white → yellow → orange → bold red). `ultracode` is shown in vivid magenta.
+- **thinking badge** — `✦ultrathink` (bold magenta) or `✦megathink` (magenta) when those keywords appear in your current prompt.
+- **fast mode** — `⚡fast` when `/fast` is active.
+
+**Line 2:** `ctx(1M|200k) | compaction-aware usage bar | % left | !200k overflow warning`
+
+**Line 3** (hidden for API-key users): session (5h) usage bar + weekly (7d) percentage, each with a `~<reset>` countdown.
 
 ## What makes this different
 
@@ -26,48 +34,37 @@ Claude Code auto-compacts your conversation at ~80% context usage. The remaining
 | 64% | 80% full | 20% left |
 | 80% | completely full | 0% left |
 
-Color coding follows the same effective scale:
-- **Green:** >50% effective remaining
-- **Yellow:** 25-50% effective remaining
-- **Red:** <25% effective remaining
+Color coding follows the same effective scale: **green** >50% remaining, **yellow** 25–50%, **red** <25%.
 
-### Model thinking effort level (the side-channel trick)
+### Reasoning effort level
 
-The official [statusline docs](https://code.claude.com/docs/en/statusline) list every JSON field available via stdin. The `effortLevel` setting (which controls extended thinking: `low`, `medium`, `high`) is **not among them**.
+The effort level (`low`/`medium`/`high`/`xhigh`/`max`) is read live from the statusline JSON at `effort.level`. This matters because **`max` is session-only and is never written to `settings.json`** — so reading it from settings (the old approach) could never display a `max` session correctly. For older Claude Code builds that don't send the field, the script falls back to `effortLevel` in `~/.claude/settings.json`.
 
-The workaround: the statusline command has full filesystem access — it's not sandboxed to the JSON on stdin. So we read `effortLevel` directly from `~/.claude/settings.json`:
+### `ultracode` detection (the JSON can't see it)
 
-```python
-def get_effort_level():
-    settings_path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
-    with open(settings_path, encoding="utf-8") as f:
-        settings = json.load(f)
-    return settings.get("effortLevel", "")
-```
+`/effort ultracode` (= "xhigh + dynamic workflow orchestration") reports to the statusline JSON as plain **`xhigh`** — there is no field or event that distinguishes it. The only on-disk trace is the `/effort` command output in your session transcript. So the script cross-checks: **if `effort.level == "xhigh"` and the most recent `Set effort level to …` line in the transcript is `ultracode`, it shows `ultracode`.** This is session-scoped for free (a new session is a new transcript) and tracks reversions (the latest `/effort` wins).
 
-This same technique can expose any setting the JSON API omits.
+It's best-effort: it only works when ultracode was set via the `/effort` slash command, and it stops once that marker drifts past the transcript scan cap (8 MB) in a very long session.
 
-### Context window size indicator
+### `ultrathink` / `megathink` badges
 
-Shows `200k` or `1M` next to the bar so you always know which context regime you're in.
+These are **per-turn prompt keywords**, not persistent settings, and they appear nowhere in the JSON. The script reads your session transcript (`transcript_path`) backward to find the most recent prompt — preferring the clean `last-prompt` event — and badges it. The same backward pass also finds the ultracode marker, so it's a single read.
 
-### 200k overflow warning
+### Context window size + 1M handling
 
-`exceeds_200k_tokens` is a fixed boolean threshold regardless of actual window size. When it fires, a red `!200k` warning appears on the bar.
+Shows `1M` or `200k` next to the bar, detected from `context_window_size` with a fallback to the `[1m]` suffix in `model.id`, so a 1M session is never mislabeled. The red `!200k` overflow warning only appears on a real 200k window — on a 1M window, going past 200k is normal, so it's suppressed.
+
+### Rate-limit windows
+
+Reads `rate_limits.five_hour` and `rate_limits.seven_day`: a bar for the 5-hour session window plus the weekly percentage, each with a relative reset countdown (`~2h00m`, `~5h50m`). Colored green/yellow/red by usage. Hidden entirely for API-key users (no `rate_limits` in the JSON). Percentages are `round()`ed because the field is now a float (e.g. `28.999999999999996`).
 
 ## Installation
-
-### Quick setup
 
 1. Copy the script to your Claude config directory:
 
 ```bash
-# macOS/Linux
 cp statusline.py ~/.claude/statusline.py
-chmod +x ~/.claude/statusline.py
-
-# Windows (Git Bash)
-cp statusline.py ~/.claude/statusline.py
+chmod +x ~/.claude/statusline.py   # macOS/Linux
 ```
 
 2. Add to `~/.claude/settings.json`:
@@ -82,81 +79,58 @@ cp statusline.py ~/.claude/statusline.py
 }
 ```
 
-3. Start or resume a Claude Code session. The statusline appears after your first interaction.
-
-### Or just ask Claude Code
-
-```
-/statusline
-```
-
-Then paste the contents of `statusline.py` when it asks what you want.
+3. Start or resume a Claude Code session — the statusline appears after your first interaction.
 
 ## Requirements
 
 - Python 3.7+
-- No external dependencies (uses only stdlib: `json`, `os`, `subprocess`, `sys`, `io`)
-- A terminal that supports ANSI escape codes (virtually all modern terminals)
+- No external dependencies (stdlib only: `json`, `os`, `subprocess`, `sys`, `io`, `re`, `datetime`)
+- A terminal that supports ANSI escape codes and 256-color (virtually all modern terminals)
 
 ## Windows notes
 
-Windows defaults to cp1252 encoding which can't render the Unicode block characters (`▓` and `░`). The script handles this automatically by forcing UTF-8 output:
+Windows defaults to cp1252 encoding, which can't render the Unicode block characters (`▓`/`░`) or the badge glyphs (`✦`/`⚡`). The script handles this by forcing UTF-8 output:
 
 ```python
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 ```
 
-## Available JSON fields
-
-The full JSON schema Claude Code sends to statusline commands (as of v2.1.71):
+## Available JSON fields (as of Claude Code v2.1.18x)
 
 | Field | Description | Used |
 |-------|-------------|------|
-| `model.display_name` | Current model (e.g. "Opus 4.6") | Line 1 |
+| `model.display_name` | Current model, e.g. "Opus 4.8 (1M context)" | Line 1 |
+| `model.id` | Raw id incl. `[1m]` suffix for 1M sessions | 1M detection |
+| `effort.level` | Live effort: `low`/`medium`/`high`/`xhigh`/`max` | Line 1 |
+| `thinking.enabled` | Whether extended thinking is on | - |
+| `fast_mode` | `/fast` mode active | Line 1 |
 | `context_window.used_percentage` | Raw % of context consumed | Bar |
-| `context_window.context_window_size` | Total tokens (200k or 1M) | `ctx(200k)` |
-| `context_window.remaining_percentage` | Raw % remaining | - |
-| `context_window.current_usage.*` | Token breakdown from last API call | - |
-| `exceeds_200k_tokens` | Fixed 200k threshold warning | `!200k` |
+| `context_window.context_window_size` | Total tokens (200k or 1000000) | `ctx(…)` |
+| `exceeds_200k_tokens` | 200k threshold flag (suppressed on 1M) | `!200k` |
 | `output_style.name` | Active output style | Line 1 |
+| `rate_limits.five_hour` / `.seven_day` | `used_percentage` (float) + `resets_at` (epoch) | Line 3 |
 | `cost.total_cost_usd` | Session spend | - |
-| `cost.total_duration_ms` | Session wall-clock time | - |
-| `cost.total_api_duration_ms` | Time waiting for API | - |
-| `cost.total_lines_added` | Lines of code added | - |
-| `cost.total_lines_removed` | Lines of code removed | - |
-| `workspace.current_dir` | Current working directory | - |
-| `workspace.project_dir` | Directory Claude was launched in | - |
-| `session_id` | Unique session ID | - |
-| `version` | Claude Code version | - |
-| `vim.mode` | `NORMAL` or `INSERT` (when enabled) | - |
-| `agent.name` | Agent name (when using `--agent`) | - |
-| `worktree.*` | Worktree name, path, branch | Line 1 |
+| `worktree.*` | Worktree name / branch | Line 1 |
+| `transcript_path` | Path to the session `.jsonl` | side-channel |
 
-**Not in JSON (side-channel required):**
+**Not in the JSON (side-channel required):**
 
-| Setting | Source | Used |
-|---------|--------|------|
-| `effortLevel` | `~/.claude/settings.json` | Line 1 |
+| Signal | Source | Used |
+|--------|--------|------|
+| `effortLevel` (fallback only) | `~/.claude/settings.json` | Line 1 |
+| `ultrathink` / `megathink` | transcript `last-prompt` / user prompt | badge |
+| `ultracode` mode | transcript `/effort` command output | Line 1 |
 
 ## Customization
 
-### Change the compaction threshold
-
-If auto-compaction behavior changes, edit the `COMPACTION_THRESHOLD` constant:
+Change the compaction threshold or bar width:
 
 ```python
-COMPACTION_THRESHOLD = 80  # change to match actual compaction point
-```
-
-### Change the bar width
-
-```python
+COMPACTION_THRESHOLD = 80          # match the actual auto-compaction point
 bar = build_bar(pct_used, width=30)  # wider bar (default: 20)
 ```
 
-### Add cost tracking
-
-If you're on a usage-based plan, add cost back to line 2:
+Add cost tracking to line 2 (useful on usage-based plans):
 
 ```python
 cost = data.get("cost", {}).get("total_cost_usd", 0) or 0
@@ -164,29 +138,9 @@ cost_str = f" {dim}|{reset} ${cost:.4f}" if cost > 0 else ""
 line2 = f"ctx({ctx_label}) {bar} {effective_remaining}% left{exceeds_str}{cost_str}"
 ```
 
-### Add session duration
-
-```python
-duration_ms = data.get("cost", {}).get("total_duration_ms", 0) or 0
-mins, secs = duration_ms // 60000, (duration_ms % 60000) // 1000
-duration_str = f" {dim}|{reset} {mins}m {secs}s"
-```
-
-### Expose other settings via side-channel
-
-```python
-def get_setting(key, default=""):
-    try:
-        path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
-        with open(path, encoding="utf-8") as f:
-            return json.load(f).get(key, default)
-    except Exception:
-        return default
-```
-
 ## Debugging
 
-Temporarily add a JSON dump to inspect all available fields:
+Temporarily dump the JSON to inspect all available fields:
 
 ```python
 debug_path = os.path.join(os.path.expanduser("~"), ".claude", "statusline_debug.json")
@@ -194,7 +148,7 @@ with open(debug_path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
 ```
 
-Then check `~/.claude/statusline_debug.json` after the next render cycle.
+Then check `~/.claude/statusline_debug.json` after the next render cycle. Note: `statusline.py` is global across all concurrent Claude Code sessions, so a fixed-path debug file gets overwritten by whichever session renders last — verify `session_id` before trusting a capture.
 
 ## License
 
